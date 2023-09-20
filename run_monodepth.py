@@ -6,18 +6,18 @@ import torch
 import cv2
 import argparse
 
-import util.io
+import utils.DPT.util.io
 
 from torchvision.transforms import Compose
 
-from dpt.models import DPTDepthModel
-from dpt.midas_net import MidasNet_large
-from dpt.transforms import Resize, NormalizeImage, PrepareForNet
+from utils.DPT.dpt.models import DPTDepthModel
+from utils.DPT.dpt.midas_net import MidasNet_large
+from utils.DPT.dpt.transforms import Resize, NormalizeImage, PrepareForNet
 
 #from util.misc import visualize_attention
 
 
-def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=True):
+def depth_estimation(input_path, output_path, model_path, model_type="dpt_large", optimize=True, absolute_depth=False, kitti_crop=False):
     """Run MonoDepthNN to compute depth maps.
 
     Args:
@@ -25,11 +25,11 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
         output_path (str): path to output folder
         model_path (str): path to saved model
     """
-    print("initialize")
+    #print("initialize")
 
     # select device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device: %s" % device)
+    #print("device: %s" % device)
 
     # load network
     if model_type == "dpt_large":  # DPT-Large
@@ -116,71 +116,69 @@ def run(input_path, output_path, model_path, model_type="dpt_hybrid", optimize=T
 
     model.to(device)
 
-    # get input
-    img_names = glob.glob(os.path.join(input_path, "*"))
-    num_images = len(img_names)
-
     # create output folder
     os.makedirs(output_path, exist_ok=True)
 
-    print("start processing")
-    for ind, img_name in enumerate(img_names):
-        if os.path.isdir(img_name):
-            continue
+    #print("start processing")
+    
+    # input
+    img = utils.DPT.util.io.read_image(input_path)
 
-        print("  processing {} ({}/{})".format(img_name, ind + 1, num_images))
-        # input
+    if kitti_crop is True:
+        height, width, _ = img.shape
+        top = height - 352
+        left = (width - 1216) // 2
+        img = img[top : top + 352, left : left + 1216, :]
 
-        img = util.io.read_image(img_name)
+    img_input = transform({"image": img})["image"]
 
-        if args.kitti_crop is True:
-            height, width, _ = img.shape
-            top = height - 352
-            left = (width - 1216) // 2
-            img = img[top : top + 352, left : left + 1216, :]
+    # compute
+    with torch.no_grad():
+        sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
 
-        img_input = transform({"image": img})["image"]
+        if optimize == True and device == torch.device("cuda"):
+            sample = sample.to(memory_format=torch.channels_last)
+            sample = sample.half()
 
-        # compute
-        with torch.no_grad():
-            sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
-
-            if optimize == True and device == torch.device("cuda"):
-                sample = sample.to(memory_format=torch.channels_last)
-                sample = sample.half()
-
-            prediction = model.forward(sample)
-            prediction = (
-                torch.nn.functional.interpolate(
-                    prediction.unsqueeze(1),
-                    size=img.shape[:2],
-                    mode="bicubic",
-                    align_corners=False,
-                )
-                .squeeze()
-                .cpu()
-                .numpy()
+        prediction = model.forward(sample)
+        prediction = (
+            torch.nn.functional.interpolate(
+                prediction.unsqueeze(1),
+                size=img.shape[:2],
+                mode="bicubic",
+                align_corners=False,
             )
-
-            if model_type == "dpt_hybrid_kitti":
-                prediction *= 256
-
-            if model_type == "dpt_hybrid_nyu":
-                prediction *= 1000.0
-
-        filename = os.path.join(
-            output_path, os.path.splitext(os.path.basename(img_name))[0]
+            .squeeze()
+            .cpu()
+            .numpy()
         )
-        util.io.write_depth(filename, prediction, bits=2, absolute_depth=args.absolute_depth)
 
-    print("finished")
+        if model_type == "dpt_hybrid_kitti":
+            prediction *= 256
+
+        if model_type == "dpt_hybrid_nyu":
+            prediction *= 1000.0
+
+    filename = os.path.join(
+        output_path, "depth"
+    )
+    utils.DPT.util.io.write_depth(filename, prediction, bits=2, absolute_depth=absolute_depth)
+
+    # Load the image
+    #image_16bit = cv2.imread(filename+".png", flags=cv2.IMREAD_ANYDEPTH)
+    #norm_image = cv2.normalize(image_16bit, None, 0, 65535, cv2.NORM_MINMAX)
+    #cv2.imwrite("output/pillow/depth.png", norm_image)
+
+    return filename+".png"
+
+    #print("finished")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "-i", "--input_path", default="input", help="folder with input images"
+        "-i", "--input_path", default="data/vase.png", help="input image"
     )
 
     parser.add_argument(
@@ -191,13 +189,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-m", "--model_weights", default=None, help="path to model weights"
+        "-m", "--model_weights", default="utils/DPT/weights/dpt_large-midas-2f21e586.pt", help="path to model weights"
     )
 
     parser.add_argument(
         "-t",
         "--model_type",
-        default="dpt_hybrid",
+        default="dpt_large",
         help="model type [dpt_large|dpt_hybrid|midas_v21]",
     )
 
@@ -229,10 +227,12 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
 
     # compute depth maps
-    run(
+    depth_estimation(
         args.input_path,
         args.output_path,
         args.model_weights,
         args.model_type,
         args.optimize,
+        args.absolute_depth,
+        args.kitti_crop
     )
